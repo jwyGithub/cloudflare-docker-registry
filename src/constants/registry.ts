@@ -8,11 +8,12 @@ export const registryConfigs: RegistryConfig = {
     'k8s-gcr': 'https://k8s.gcr.io',
     k8s: 'https://registry.k8s.io',
     ghcr: 'https://ghcr.io',
-    cloudsmith: 'https://docker.cloudsmith.io'
+    cloudsmith: 'https://docker.cloudsmith.io',
+    mcr: 'https://mcr.microsoft.com'
 };
 
 export const registryGroupMap = {
-    docker: ['docker', 'quay', 'gcr', 'k8s-gcr', 'k8s', 'ghcr', 'cloudsmith']
+    docker: ['docker', 'quay', 'gcr', 'k8s-gcr', 'k8s', 'ghcr', 'cloudsmith', 'mcr']
 };
 
 export const REGISTRY_PATH_PATTERN = /^\/v2\/[^/]+\/[^/]+\/[^/]+$/;
