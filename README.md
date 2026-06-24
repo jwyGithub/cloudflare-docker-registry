@@ -12,6 +12,7 @@
   - Kubernetes Registry (`registry.k8s.io`)
   - GitHub Container Registry (`ghcr.io`)
   - Cloudsmith (`docker.cloudsmith.io`)
+  - Mcr (`mcr.microsoft.com`)
 
 - 🔐 **认证处理**：自动处理 Docker Registry 的认证流程和 token 获取
 
