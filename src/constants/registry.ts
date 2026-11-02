@@ -12,12 +12,6 @@ export const registryConfigs: RegistryConfig = {
     mcr: 'https://mcr.microsoft.com'
 };
 
-export const registryGroupMap = {
-    docker: ['docker', 'quay', 'gcr', 'k8s-gcr', 'k8s', 'ghcr', 'cloudsmith', 'mcr']
-};
-
 export const REGISTRY_PATH_PATTERN = /^\/v2\/[^/]+\/[^/]+\/[^/]+$/;
-
-export const AUTH_REG = /realm="(.+)",service="(.+)"(?:,scope="(.+)")?/;
 
 export const REPOSITORY_REG = /^repository:((?:([^/]+)\/)?([^/:]+))(:(.+))?$/;

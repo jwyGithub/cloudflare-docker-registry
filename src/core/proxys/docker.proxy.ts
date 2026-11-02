@@ -1,77 +1,82 @@
-import type { AuthConfig, RegistryConfig } from '../../types';
-import { AUTH_REG, REGISTRY_PATH_PATTERN, registryConfigs, REPOSITORY_REG } from '../../constants/registry';
+import type { RegistryConfig, RegistryType } from '../../types';
+import { REGISTRY_PATH_PATTERN, registryConfigs, REPOSITORY_REG } from '../../constants/registry';
+
+const tokenHosts: Record<RegistryType, string[]> = {
+    docker: ['auth.docker.io'],
+    quay: ['quay.io'],
+    gcr: ['gcr.io'],
+    'k8s-gcr': ['k8s.gcr.io'],
+    k8s: ['registry.k8s.io'],
+    ghcr: ['ghcr.io'],
+    cloudsmith: ['docker.cloudsmith.io', 'auth.cloudsmith.io'],
+    mcr: ['mcr.microsoft.com']
+};
 
 export class DockerProxy {
     private request: Request;
     private url: URL;
-    private authorization: string = '';
-    private isDocker: boolean = false;
     constructor(request: Request) {
         this.request = request;
         this.url = new URL(request.url);
     }
 
-    public async forward(upstream: string): Promise<Response> {
-        this.authorization = this.request.headers.get('Authorization') || '';
-        this.isDocker = this.isDockerRegistry();
-
+    public async forward(upstream: string, registry: RegistryType): Promise<Response> {
         if (this.url.pathname === '/v2/') {
             const registryUrl = new URL(`${upstream}/v2/`);
-            const headers = new Headers();
-            if (this.authorization) {
-                headers.set('Authorization', this.authorization);
-            }
-
             const resp = await fetch(registryUrl.toString(), {
                 method: this.request.method,
-                headers,
+                headers: this.request.headers,
                 redirect: 'manual'
             });
 
             if (resp.status === 401) {
-                // 将realm设置为当前服务的/v2/auth
-                const { realm, service } = this.parseAuthenticate(resp);
-                headers.set(
-                    'Www-Authenticate',
-                    `Bearer realm="https://${this.url.hostname}/v2/auth?get_token_url=${realm}",service="${service}"`
-                );
-                return new Response('UNAUTHORIZED', { status: 401, headers });
+                return this.rewriteAuthenticate(resp, registry);
             } else {
                 return resp;
             }
         }
 
         if (this.url.pathname === '/v2/auth') {
-            const get_token_url = this.url.searchParams.get('get_token_url');
+            const realm = this.url.searchParams.get('realm');
+            const registry = this.url.searchParams.get('registry') as RegistryType | null;
             const service = this.url.searchParams.get('service');
-            const scope = this.isDocker ? this.updateScope(this.url.searchParams.get('scope')!) : this.url.searchParams.get('scope');
-            const token = await this.getToken(get_token_url, service, scope);
-            return token;
+            const requestedScope = this.url.searchParams.get('scope');
+            const scope = registry === 'docker' && requestedScope ? this.updateScope(requestedScope) : requestedScope;
+            return this.getToken(realm, registry, service, scope);
         }
 
-        if (this.isDocker && this.isRegistryPath(this.url.pathname)) {
+        if (registry === 'docker' && this.isRegistryPath(this.url.pathname)) {
             const redirectUrl = new URL(this.request.url);
             redirectUrl.pathname = redirectUrl.pathname.replace('/v2/', '/v2/library/');
             return Response.redirect(redirectUrl.href, 301);
         }
 
-        const newUrl = new URL(upstream + this.url.pathname);
-        const newReq = new Request(newUrl, {
-            method: this.request.method,
-            headers: this.request.headers,
-            redirect: 'follow'
-        });
+        const newUrl = new URL(upstream + this.url.pathname + this.url.search);
+        const newReq = new Request(newUrl, this.request);
 
-        return await fetch(newReq);
+        const resp = await fetch(newReq);
+        return resp.status === 401 ? this.rewriteAuthenticate(resp, registry) : resp;
     }
 
-    /**
-     * 判断请求是否是 Docker Registry 请求
-     * @returns 是否是 Docker Registry 请求
-     */
-    private isDockerRegistry(): boolean {
-        const keys = Object.keys(registryConfigs) as (keyof RegistryConfig)[];
-        return keys.some(key => this.url.hostname.startsWith(key));
+    private rewriteAuthenticate(resp: Response, registry: RegistryType): Response {
+        const authenticate = this.parseAuthenticate(resp);
+        if (!authenticate) return resp;
+        const authUrl = new URL('/v2/auth', this.url.origin);
+        authUrl.searchParams.set('registry', registry);
+        authUrl.searchParams.set('realm', authenticate.realm);
+        authUrl.searchParams.set('service', authenticate.service);
+        if (authenticate.scope) authUrl.searchParams.set('scope', authenticate.scope);
+        const headers = new Headers(resp.headers);
+        headers.set(
+            'Www-Authenticate',
+            'Bearer realm="' +
+                authUrl.href +
+                '",service="' +
+                authenticate.service +
+                '"' +
+                (authenticate.scope ? ',scope="' + authenticate.scope + '"' : '')
+        );
+        return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers });
     }
 
     /**
@@ -89,8 +94,8 @@ export class DockerProxy {
      * @returns 更新后的 scope
      */
     private updateScope(scope: string): string {
-        const [_, __, library] = scope.match(REPOSITORY_REG) || [];
-        if (!library) {
+        const [, , namespace] = scope.match(REPOSITORY_REG) || [];
+        if (!namespace) {
             return scope.replace(/repository:([^:]+)/, 'repository:library/$1');
         }
         return scope;
@@ -101,34 +106,60 @@ export class DockerProxy {
      * @param resp 响应
      * @returns 认证信息
      */
-    private parseAuthenticate(resp: Response): AuthConfig {
+    private parseAuthenticate(resp: Response): { realm: string; service: string; scope?: string } | null {
         const authenticate = resp.headers.get('www-authenticate');
-        const [_, realm, service, scope] = authenticate?.match(AUTH_REG) ?? [];
-        return {
-            realm,
-            service,
-            scope
-        };
+        const values = authenticate?.match(/\b(realm|service|scope)="([^"]*)"/g);
+        if (!values) return null;
+        const params = Object.fromEntries(
+            values.map(value => {
+                const [, key, content] = value.match(/^(realm|service|scope)="([^"]*)"$/)!;
+                return [key, content];
+            })
+        );
+        if (!params.realm || !params.service) return null;
+        return { realm: params.realm, service: params.service, scope: params.scope };
     }
 
     /**
      * 获取 token
-     * @param get_token_url 获取 token 的 url
+     * @param realm 上游声明的认证地址
+     * @param registry 当前选择的仓库
      * @param service 服务
      * @param scope scope
      * @returns 响应
      */
-    private async getToken(get_token_url: string | null, service: string | null, scope: string | null): Promise<Response> {
-        if (!get_token_url || !service || !scope) {
+    private async getToken(
+        realm: string | null,
+        registry: RegistryType | null,
+        service: string | null,
+        scope: string | null
+    ): Promise<Response> {
+        if (!realm || !registry || !service || !Object.hasOwn(registryConfigs, registry)) {
             return new Response('Failed to get request token url', { status: 400 });
         }
-        const searchParams = new URLSearchParams();
-        searchParams.set('service', service);
-        searchParams.set('scope', scope);
-        const tokenUrl = `${get_token_url}?${searchParams.toString()}`;
-        const token = await fetch(tokenUrl, {
+        let tokenUrl: URL;
+        try {
+            tokenUrl = new URL(realm);
+        } catch {
+            return new Response('Invalid token realm', { status: 400 });
+        }
+        if (
+            tokenUrl.protocol !== 'https:' ||
+            tokenUrl.username ||
+            tokenUrl.password ||
+            (tokenUrl.port && tokenUrl.port !== '443') ||
+            !tokenHosts[registry].includes(tokenUrl.hostname)
+        ) {
+            return new Response('Invalid token realm', { status: 400 });
+        }
+        tokenUrl.searchParams.set('service', service);
+        if (scope) tokenUrl.searchParams.set('scope', scope);
+        const headers = new Headers();
+        const authorization = this.request.headers.get('Authorization');
+        if (authorization) headers.set('Authorization', authorization);
+        return fetch(tokenUrl, {
+            headers,
             redirect: 'manual'
         });
-        return token;
     }
 }
